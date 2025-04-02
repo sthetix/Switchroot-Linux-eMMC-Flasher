@@ -26,16 +26,16 @@ This Bash script automates the process of flashing a Linux distribution to the e
 ## Usage
 1. **Clone the Repository**:
    ```bash
-   git clone https://github.com/<your-username>/switchroot-emmc-flash.git
+   git clone https://github.com/sthetix/switchroot-emmc-flash.git
    cd switchroot-emmc-flash
 
 2. **Make the Script Executable**:
     ```bash
-    chmod +x switchroot_emmc_flash.sh
+    chmod +x flash_linux.sh
 
 3. **Run the Script**:
    ```bash
-   ./switchroot_emmc_flash.sh
+   ./flash_linux.sh
 
 
 4. **Follow the on-screen prompts to**:

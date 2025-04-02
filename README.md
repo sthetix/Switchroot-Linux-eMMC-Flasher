@@ -27,7 +27,7 @@ This Bash script automates the process of flashing a Linux distribution to the e
 1. **Clone the Repository**:
    ```bash
    git clone https://github.com/sthetix/Switchroot-Linux-eMMC-Flasher
-   cd switchroot-emmc-flash
+   cd Switchroot-Linux-eMMC-Flasher
 
 2. **Make the Script Executable**:
     ```bash

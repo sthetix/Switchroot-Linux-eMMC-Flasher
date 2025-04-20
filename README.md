@@ -6,6 +6,13 @@
 
 This Bash script automates the process of flashing a Linux distribution to the eMMC of a Nintendo Switch using a Linux environment. It fetches available Switchroot Linux variants from `download.switchroot.org`, prepares an SD card with necessary boot files, and flashes the selected distribution to the Switch's eMMC.
 
+![Warning](https://img.shields.io/badge/⚠️-WARNING-red)  
+**⚠️ THIS SCRIPT WILL WIPE YOUR ENTIRE EMMC! ⚠️**  
+**PLEASE BACK UP YOUR NAND BEFORE PROCEEDING!**  
+If you do not back up your NAND, you will **lose access to the Nintendo Switch Horizon OS (HOS)** and will **not be able to restore it** without a backup.  
+Use this script **AT YOUR OWN RISK**. We are not responsible for any data loss or damage to your device.
+
+
 ## Features
 - **Dynamic Distribution Fetching**: Downloads available Linux variants (Ubuntu, Fedora) from `download.switchroot.org`.
 - **SD Card Preparation**: Copies boot files and configures Hekate `.ini` files for eMMC booting.

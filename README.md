@@ -6,6 +6,7 @@
 
 This Bash script automates the process of flashing a Linux distribution to the eMMC of a Nintendo Switch using a Linux environment. It fetches available Switchroot Linux variants from `download.switchroot.org`, prepares an SD card with necessary boot files, and flashes the selected distribution to the Switch's eMMC.
 
+
 ![Warning](https://img.shields.io/badge/⚠️-WARNING-red)  
 **⚠️ THIS SCRIPT WILL WIPE YOUR ENTIRE EMMC! ⚠️**  
 **PLEASE BACK UP YOUR NAND BEFORE PROCEEDING!**  

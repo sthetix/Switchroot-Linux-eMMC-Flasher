@@ -14,7 +14,7 @@ fi
 clear
 echo "$(tput bold)================ Switchroot Linux eMMC Flash Script ================$(tput sgr0)"
 echo "Requirements: Linux environment, Hekate, SD card (FAT32), internet."
-echo "Fetches Linux variants from download.switchroot.org - Version 1.0.1"
+echo "Fetches Linux variants from download.switchroot.org - Version 1.0.2"
 echo "Setting up, please wait..."
 
 # Dependency check
@@ -110,7 +110,7 @@ for SUBFOLDER in "${SUBFOLDERS[@]}"; do
                     OPTION_NAME="${DISTRO_MAP[$SUBFOLDER_LOWER]}"
                 fi
                 OPTIONS+=("$INDEX) $OPTION_NAME - $ZIP_FILE")
-                eval "ZIP_URL_$INDEX=$BASE_URL/$SUBFOLDER_LOWER/$ZIP_FILE"
+                eval "ZIP_URL_$INDEX=$BASE_URL$ZIP_FILE"
                 eval "DISTRO_$INDEX=$SUBFOLDER"
                 eval "ID_$INDEX=SWR-${SUBFOLDER%%-*}"
                 eval "PREFIX_$INDEX=/switchroot/$SUBFOLDER_LOWER/"
@@ -220,7 +220,7 @@ echo ""
 if [ "$DISTRO_CHOICE" -eq 0 ]; then
     echo "Selected: $DISTRO (0) Use local OS image file (.7z))"
 else
-    echo "Selected: $DISTRO (${OPTIONS[$((DISTRO_CHOICE-1))]})"
+    echo "Selected: $DISTRO (${OPTIONS[$DISTRO_CHOICE]})"
 fi
 echo ""
 

@@ -1,7 +1,7 @@
 # Switchroot Linux eMMC Flash Script
 
 <div align="center">
-  <img src="https://github.com/sthetix/Switchroot-Linux-eMMC-Flasher/blob/main/title.png" alt="Switchroot Linux eMMC Flasher Title" width="70%">
+  <img src="/image/preview.png" alt="Switchroot Linux eMMC Flasher Title" width="70%">
 </div>
 
 This Bash script automates the process of flashing a Linux distribution to the eMMC of a Nintendo Switch using a Linux environment. It fetches available Switchroot Linux variants from `download.switchroot.org`, prepares an SD card with necessary boot files, and flashes the selected distribution to the Switch's eMMC.

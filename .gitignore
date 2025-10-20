@@ -1,0 +1,8 @@
+# Ignore specific folders
+archive/
+icons/
+releases/
+versions/
+testing/
+
+

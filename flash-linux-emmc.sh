@@ -14,7 +14,7 @@ fi
 clear
 echo "$(tput bold)================ Switchroot Linux eMMC Flash Script ================$(tput sgr0)"
 echo "Requirements: Linux environment, Hekate, SD card (FAT32), internet."
-echo "Fetches Linux variants from download.switchroot.org - Version 1.0.2"
+echo "Fetches Linux variants from download.switchroot.org - Version 1.1.0"
 echo "Setting up, please wait..."
 
 # Dependency check
@@ -57,20 +57,79 @@ echo ""
 
 echo "Fetching available distributions..."
 
-# Fetch Switchroot Linux distros only
+# Setup logging
 echo "Setup started at $(date)" > "$LOG_FILE"
-SUBFOLDERS=("ubuntu-bionic" "Ubuntu-jammy" "Ubuntu-noble" "fedora-39" "fedora-41")
+
+# Auto-discover Linux distros from the server
+BASE_URL="https://download.switchroot.org"
+LINUX_KEYWORDS="ubuntu|fedora|lakka|arch|debian|manjaro|opensuse"
+
+echo "Discovering available distributions from $BASE_URL..."
+echo "Auto-discovery started" >> "$LOG_FILE"
+
+# Fetch directory listing and extract Linux distro folders
+RAW_LISTING=$(curl -s "$BASE_URL/")
+if [ -z "$RAW_LISTING" ]; then
+    echo "  $(tput bold)Error: Failed to fetch distribution list from server!$(tput sgr0)"
+    echo "  Check your internet connection and try again."
+    exit 1
+fi
+
+# Extract directory names (href="/dirname/" or href="dirname/") and filter for Linux distros
+SUBFOLDERS=()
+while IFS= read -r dir; do
+    if [ -n "$dir" ]; then
+        SUBFOLDERS+=("$dir")
+        echo "  Discovered: $dir"
+        echo "Discovered distro: $dir" >> "$LOG_FILE"
+    fi
+done < <(echo "$RAW_LISTING" | grep -oP 'href="/?(\K[^"/]+)(?=/")' | grep -iE "^($LINUX_KEYWORDS)" | sort -u)
+
+if [ ${#SUBFOLDERS[@]} -eq 0 ]; then
+    echo "  $(tput bold)Error: No Linux distributions found on server!$(tput sgr0)"
+    echo "  This may indicate a server issue or network problem."
+    exit 1
+fi
+
+echo "Found ${#SUBFOLDERS[@]} distribution(s)."
+echo ""
+
+# Function to generate friendly display name from folder name
+get_distro_display_name() {
+    local folder="$1"
+    local name=""
+
+    # Parse folder name (e.g., "ubuntu-noble" -> "Ubuntu Noble", "fedora-42" -> "Fedora 42")
+    if [[ "$folder" =~ ^ubuntu-(.+)$ ]]; then
+        local version="${BASH_REMATCH[1]}"
+        case "$version" in
+            bionic) name="Ubuntu Bionic (18.04)" ;;
+            jammy)  name="Ubuntu Jammy (22.04)" ;;
+            noble)  name="Ubuntu Noble (24.04)" ;;
+            *)      name="Ubuntu ${version^}" ;;  # Capitalize first letter
+        esac
+    elif [[ "$folder" =~ ^fedora-(.+)$ ]]; then
+        name="Fedora ${BASH_REMATCH[1]}"
+    elif [[ "$folder" =~ ^lakka$ ]]; then
+        name="Lakka (RetroArch)"
+    else
+        # Generic: capitalize first letter of each word
+        name=$(echo "$folder" | sed 's/-/ /g' | sed 's/\b\(.\)/\u\1/g')
+    fi
+
+    echo "$name"
+}
+
+# Build distro map dynamically
 declare -A DISTRO_MAP
-DISTRO_MAP["ubuntu-bionic"]="Ubuntu Bionic (18.04)"
-DISTRO_MAP["ubuntu-jammy"]="Ubuntu Jammy (22.04)"
-DISTRO_MAP["ubuntu-noble"]="Ubuntu Noble (24.04)"
-DISTRO_MAP["fedora-39"]="Fedora 39"
-DISTRO_MAP["fedora-41"]="Fedora 41"
+for folder in "${SUBFOLDERS[@]}"; do
+    DISTRO_MAP["$folder"]="$(get_distro_display_name "$folder")"
+    echo "Mapped: $folder -> ${DISTRO_MAP[$folder]}" >> "$LOG_FILE"
+done
 
 OPTIONS=()
 INDEX=1
 MAX_RETRIES=3
-BASE_URL="https://download.switchroot.org"
 
 for SUBFOLDER in "${SUBFOLDERS[@]}"; do
     SUBFOLDER_LOWER=$(echo "$SUBFOLDER" | tr '[:upper:]' '[:lower:]')
@@ -350,38 +409,89 @@ echo "Modified $INI_FILE for single-partition eMMC booting." >> "$LOG_FILE"
 echo "Current $INI_FILE content:" >> "$LOG_FILE"
 cat "$INI_FILE" >> "$LOG_FILE"
 
-# Find boot files (case-insensitive)
-SWITCHROOT_SUBDIR=$(find "$EXTRACTED_DIR/switchroot" -maxdepth 1 -type d -iname "$DISTRO_LOWER" -print -quit)
+# Smart boot files detection - handles various archive structures
+echo "  Searching for boot files..."
+echo "Searching for boot files in extracted archive..." >> "$LOG_FILE"
+
+SWITCHROOT_SUBDIR=""
+SWITCHROOT_PATH=""
+
+# Strategy 1: Look for exact distro match (e.g., switchroot/ubuntu-noble/, switchroot/fedora-42/)
+if [ -d "$EXTRACTED_DIR/switchroot" ]; then
+    SWITCHROOT_SUBDIR=$(find "$EXTRACTED_DIR/switchroot" -maxdepth 1 -type d -iname "$DISTRO_LOWER" -print -quit 2>/dev/null)
+    echo "Strategy 1 (exact match '$DISTRO_LOWER'): ${SWITCHROOT_SUBDIR:-not found}" >> "$LOG_FILE"
+fi
+
+# Strategy 2: Look for distro base name match (e.g., fedora-42 -> fedora, ubuntu-noble -> ubuntu)
+if [ -z "$SWITCHROOT_SUBDIR" ] && [ -d "$EXTRACTED_DIR/switchroot" ]; then
+    DISTRO_BASE=$(echo "$DISTRO_LOWER" | sed 's/-[0-9]*$//' | sed 's/-.*$//')
+    SWITCHROOT_SUBDIR=$(find "$EXTRACTED_DIR/switchroot" -maxdepth 1 -type d -iname "$DISTRO_BASE" -print -quit 2>/dev/null)
+    echo "Strategy 2 (base name '$DISTRO_BASE'): ${SWITCHROOT_SUBDIR:-not found}" >> "$LOG_FILE"
+fi
+
+# Strategy 3: Look for any non-install directory with boot files inside switchroot/
+if [ -z "$SWITCHROOT_SUBDIR" ] && [ -d "$EXTRACTED_DIR/switchroot" ]; then
+    for subdir in "$EXTRACTED_DIR/switchroot"/*/; do
+        if [ -d "$subdir" ]; then
+            subdir_name=$(basename "$subdir")
+            # Skip the install directory
+            if [ "$subdir_name" = "install" ]; then
+                continue
+            fi
+            # Check if this directory contains boot files
+            if ls "$subdir"/*.{bin,scr,dtimg} "$subdir"/initramfs "$subdir"/uImage 2>/dev/null | head -1 > /dev/null; then
+                SWITCHROOT_SUBDIR="$subdir"
+                echo "Strategy 3 (found boot files in '$subdir_name'): $SWITCHROOT_SUBDIR" >> "$LOG_FILE"
+                break
+            fi
+        fi
+    done
+fi
+
+# Strategy 4: Look for boot files in the root extracted directory
+if [ -z "$SWITCHROOT_SUBDIR" ]; then
+    BOOT_FILES=$(ls "$EXTRACTED_DIR"/*.{bin,bmp,scr,dtimg} "$EXTRACTED_DIR"/initramfs "$EXTRACTED_DIR"/uImage 2>/dev/null || true)
+    if [ -n "$BOOT_FILES" ]; then
+        echo "Strategy 4 (root level boot files): found" >> "$LOG_FILE"
+        echo "  Found boot files in root directory, reorganizing..."
+        mkdir -p "$TEMP_DIR/switchroot/$DISTRO_LOWER"
+        mv "$EXTRACTED_DIR"/*.{bin,bmp,scr,dtimg} "$EXTRACTED_DIR"/initramfs "$EXTRACTED_DIR"/uImage "$TEMP_DIR/switchroot/$DISTRO_LOWER/" 2>/dev/null || true
+        SWITCHROOT_SUBDIR="$TEMP_DIR/switchroot/$DISTRO_LOWER"
+    fi
+fi
+
+# Process the found directory
 if [ -n "$SWITCHROOT_SUBDIR" ]; then
     SUBDIR_NAME=$(basename "$SWITCHROOT_SUBDIR")
     SWITCHROOT_PATH="/switchroot/$SUBDIR_NAME/"
     echo "  Found switchroot directory: $SWITCHROOT_SUBDIR"
+    echo "Using switchroot path: $SWITCHROOT_PATH" >> "$LOG_FILE"
+
+    # Move to standard location if needed
     if [ "$SWITCHROOT_SUBDIR" != "$TEMP_DIR/switchroot/$SUBDIR_NAME" ]; then
+        mkdir -p "$TEMP_DIR/switchroot"
         mv "$SWITCHROOT_SUBDIR" "$TEMP_DIR/switchroot/$SUBDIR_NAME" 2>/dev/null || true
+        SWITCHROOT_SUBDIR="$TEMP_DIR/switchroot/$SUBDIR_NAME"
     fi
-    if grep -q "boot_prefixes=" "$INI_FILE" && ! grep -q "boot_prefixes=$SWITCHROOT_PATH" "$INI_FILE"; then
+
+    # Update boot_prefixes in INI file
+    if grep -q "boot_prefixes=" "$INI_FILE"; then
         sed -i "s|boot_prefixes=.*|boot_prefixes=$SWITCHROOT_PATH|" "$INI_FILE"
         echo "Updated boot_prefixes to $SWITCHROOT_PATH in $INI_FILE." >> "$LOG_FILE"
+    else
+        echo "boot_prefixes=$SWITCHROOT_PATH" >> "$INI_FILE"
+        echo "Added boot_prefixes=$SWITCHROOT_PATH to $INI_FILE." >> "$LOG_FILE"
     fi
 else
-    BOOT_FILES=$(ls "$EXTRACTED_DIR"/*.{bin,bmp,scr,dtimg} "$EXTRACTED_DIR"/initramfs "$EXTRACTED_DIR"/uImage 2>/dev/null || true)
-    if [ -n "$BOOT_FILES" ]; then
-        echo "  Moving boot files to switchroot/$DISTRO_LOWER/"
-        mkdir -p "$TEMP_DIR/switchroot/$DISTRO_LOWER"
-        mv "$EXTRACTED_DIR"/*.{bin,bmp,scr,dtimg} "$EXTRACTED_DIR"/initramfs "$EXTRACTED_DIR"/uImage "$TEMP_DIR/switchroot/$DISTRO_LOWER/" 2>/dev/null || true
-        SWITCHROOT_PATH="/switchroot/$DISTRO_LOWER/"
-        if grep -q "boot_prefixes=" "$INI_FILE"; then
-            sed -i "s|boot_prefixes=.*|boot_prefixes=$SWITCHROOT_PATH|" "$INI_FILE"
-        else
-            echo "boot_prefixes=$SWITCHROOT_PATH" >> "$INI_FILE"
-        fi
-        echo "Set boot_prefixes to $SWITCHROOT_PATH in $INI_FILE." >> "$LOG_FILE"
-    else
-        echo "  $(tput bold)Error: No switchroot directory or boot files found!$(tput sgr0)"
-        echo "Extracted structure:" >> "$LOG_FILE"
-        ls -lR "$EXTRACTED_DIR" >> "$LOG_FILE"
-        exit 1
-    fi
+    echo "  $(tput bold)Error: No switchroot directory or boot files found!$(tput sgr0)"
+    echo ""
+    echo "  The extracted archive doesn't contain the expected boot file structure."
+    echo "  Expected: switchroot/<distro>/ directory with boot files, or boot files in root."
+    echo ""
+    echo "  Please check the log file for details: $LOG_FILE"
+    echo "Extracted structure:" >> "$LOG_FILE"
+    ls -lR "$EXTRACTED_DIR" >> "$LOG_FILE"
+    exit 1
 fi
 
 # Prepare the filesystem image for flashing

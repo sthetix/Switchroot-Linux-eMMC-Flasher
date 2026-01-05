@@ -18,9 +18,88 @@ echo "Fetches Linux variants from download.switchroot.org - Version 1.1.0"
 echo "Setting up, please wait..."
 
 # Dependency check
-TEMP_DIR="/tmp/switchroot_temp"
+# Allow user to override temp directory via environment variable
+# Usage: TEMP_DIR=/path/to/large/disk ./flash-linux-emmc.sh
+TEMP_DIR="${TEMP_DIR:-/tmp/switchroot_temp}"
 LOG_FILE="$TEMP_DIR/setup_log.txt"
-rm -rf "$TEMP_DIR"
+
+# Check if temp directory is on /tmp and has limited space
+if [[ "$TEMP_DIR" == /tmp/* ]]; then
+    TMP_AVAIL=$(df /tmp | tail -1 | awk '{print $4}')
+    TMP_AVAIL_GB=$((TMP_AVAIL / 1024 / 1024))
+    if [ "$TMP_AVAIL_GB" -lt 10 ]; then
+        echo "$(tput bold)Warning: /tmp has only ${TMP_AVAIL_GB}GB free space!$(tput sgr0)"
+        echo "  Extracting large archives requires ~8-10GB of free space."
+        echo ""
+        echo "  You can specify a custom temp directory with more space:"
+        echo "  $(tput bold)TEMP_DIR=/path/to/large/disk sudo -E ./flash-linux-emmc.sh$(tput sgr0)"
+        echo ""
+        read -p "Continue anyway? (y/N): " CONTINUE_LOW_SPACE
+        if [ "$CONTINUE_LOW_SPACE" != "y" ] && [ "$CONTINUE_LOW_SPACE" != "Y" ]; then
+            echo "Exiting. Please specify TEMP_DIR with more space."
+            exit 1
+        fi
+    fi
+fi
+
+# Check if temp directory exists and has downloaded files
+PRESERVE_DOWNLOADS=false
+CACHED_DISTRO=""
+CACHED_7Z_FILE=""
+
+if [ -d "$TEMP_DIR" ]; then
+    # Look for any .7z files that might be previous downloads
+    if ls "$TEMP_DIR"/*.7z >/dev/null 2>&1; then
+        CACHED_7Z_FILE=$(ls "$TEMP_DIR"/*.7z | head -1)
+        CACHED_7Z_NAME=$(basename "$CACHED_7Z_FILE")
+
+        # Try to detect which distro this is from filename
+        if [[ "$CACHED_7Z_NAME" =~ fedora-39 ]]; then
+            CACHED_DISTRO="fedora-39"
+        elif [[ "$CACHED_7Z_NAME" =~ fedora-41 ]]; then
+            CACHED_DISTRO="fedora-41"
+        elif [[ "$CACHED_7Z_NAME" =~ fedora-42 ]]; then
+            CACHED_DISTRO="fedora-42"
+        elif [[ "$CACHED_7Z_NAME" =~ [uU]buntu.*[bB]ionic ]]; then
+            CACHED_DISTRO="ubuntu-bionic"
+        elif [[ "$CACHED_7Z_NAME" =~ [uU]buntu.*[jJ]ammy ]]; then
+            CACHED_DISTRO="ubuntu-jammy"
+        elif [[ "$CACHED_7Z_NAME" =~ [uU]buntu.*[nN]oble ]]; then
+            CACHED_DISTRO="ubuntu-noble"
+        elif [[ "$CACHED_7Z_NAME" =~ lakka ]]; then
+            CACHED_DISTRO="lakka"
+        fi
+
+        if [ -n "$CACHED_DISTRO" ]; then
+            echo "$(tput bold)Found cached download: $CACHED_7Z_NAME$(tput sgr0)"
+            echo "  Detected distro: $CACHED_DISTRO"
+            echo ""
+            read -p "Use this cached download? (Y/n): " USE_CACHED
+
+            if [ "$USE_CACHED" = "n" ] || [ "$USE_CACHED" = "N" ]; then
+                echo "  Clearing temp directory to download new distro..."
+                rm -rf "$TEMP_DIR"
+            else
+                echo "  Using cached download"
+                PRESERVE_DOWNLOADS=true
+                # Move downloads to a safe location temporarily
+                mkdir -p "${TEMP_DIR}_backup"
+                mv "$TEMP_DIR"/*.7z "${TEMP_DIR}_backup/" 2>/dev/null || true
+            fi
+        else
+            echo "Found existing download but couldn't detect distro"
+            PRESERVE_DOWNLOADS=true
+            mkdir -p "${TEMP_DIR}_backup"
+            mv "$TEMP_DIR"/*.7z "${TEMP_DIR}_backup/" 2>/dev/null || true
+        fi
+    fi
+fi
+
+# Only clean temp dir if not preserving
+if [ "$PRESERVE_DOWNLOADS" = false ]; then
+    rm -rf "$TEMP_DIR"
+fi
+
 mkdir -p "$TEMP_DIR" || {
     echo "Error: Failed to create $TEMP_DIR!"
     exit 1
@@ -30,9 +109,19 @@ chmod -R u+rw "$TEMP_DIR" || {
     exit 1
 }
 
+# Restore preserved downloads and update CACHED_7Z_FILE path
+if [ "$PRESERVE_DOWNLOADS" = true ]; then
+    mv "${TEMP_DIR}_backup"/*.7z "$TEMP_DIR/" 2>/dev/null || true
+    rm -rf "${TEMP_DIR}_backup"
+    # Update CACHED_7Z_FILE to point to the restored location
+    if [ -n "$CACHED_7Z_FILE" ]; then
+        CACHED_7Z_FILE="$TEMP_DIR/$(basename "$CACHED_7Z_FILE")"
+    fi
+fi
+
 echo "Checking dependencies..."
-COMMANDS=("curl" "gdisk" "bc" "lsblk" "7z" "tar" "mkfs.ext4" "partprobe" "sgdisk")
-PACKAGES=("curl" "gdisk" "bc" "lsblk" "p7zip-full" "tar" "e2fsprogs" "parted" "gdisk")
+COMMANDS=("curl" "gdisk" "bc" "lsblk" "7z" "tar" "mkfs.ext4" "partprobe" "sgdisk" "aria2c")
+PACKAGES=("curl" "gdisk" "bc" "lsblk" "p7zip-full" "tar" "e2fsprogs" "parted" "gdisk" "aria2")
 
 for i in "${!COMMANDS[@]}"; do
     cmd="${COMMANDS[$i]}"
@@ -55,8 +144,6 @@ done
 echo "All dependencies satisfied."
 echo ""
 
-echo "Fetching available distributions..."
-
 # Setup logging
 echo "Setup started at $(date)" > "$LOG_FILE"
 
@@ -64,35 +151,44 @@ echo "Setup started at $(date)" > "$LOG_FILE"
 BASE_URL="https://download.switchroot.org"
 LINUX_KEYWORDS="ubuntu|fedora|lakka|arch|debian|manjaro|opensuse"
 
-echo "Discovering available distributions from $BASE_URL..."
-echo "Auto-discovery started" >> "$LOG_FILE"
+# Skip discovery AND file listing if we're using cached distro
+SKIP_FILE_LISTING=false
+if [ -n "$CACHED_DISTRO" ] && [ "$PRESERVE_DOWNLOADS" = true ]; then
+    echo "Skipping distribution discovery (using cached: $CACHED_DISTRO)"
+    SUBFOLDERS=("$CACHED_DISTRO")
+    SKIP_FILE_LISTING=true
+else
+    echo "Fetching available distributions..."
+    echo "Discovering available distributions from $BASE_URL..."
+    echo "Auto-discovery started" >> "$LOG_FILE"
 
-# Fetch directory listing and extract Linux distro folders
-RAW_LISTING=$(curl -s "$BASE_URL/")
-if [ -z "$RAW_LISTING" ]; then
-    echo "  $(tput bold)Error: Failed to fetch distribution list from server!$(tput sgr0)"
-    echo "  Check your internet connection and try again."
-    exit 1
-fi
-
-# Extract directory names (href="/dirname/" or href="dirname/") and filter for Linux distros
-SUBFOLDERS=()
-while IFS= read -r dir; do
-    if [ -n "$dir" ]; then
-        SUBFOLDERS+=("$dir")
-        echo "  Discovered: $dir"
-        echo "Discovered distro: $dir" >> "$LOG_FILE"
+    # Fetch directory listing and extract Linux distro folders
+    RAW_LISTING=$(curl -s "$BASE_URL/")
+    if [ -z "$RAW_LISTING" ]; then
+        echo "  $(tput bold)Error: Failed to fetch distribution list from server!$(tput sgr0)"
+        echo "  Check your internet connection and try again."
+        exit 1
     fi
-done < <(echo "$RAW_LISTING" | grep -oP 'href="/?(\K[^"/]+)(?=/")' | grep -iE "^($LINUX_KEYWORDS)" | sort -u)
 
-if [ ${#SUBFOLDERS[@]} -eq 0 ]; then
-    echo "  $(tput bold)Error: No Linux distributions found on server!$(tput sgr0)"
-    echo "  This may indicate a server issue or network problem."
-    exit 1
+    # Extract directory names (href="/dirname/" or href="dirname/") and filter for Linux distros
+    SUBFOLDERS=()
+    while IFS= read -r dir; do
+        if [ -n "$dir" ]; then
+            SUBFOLDERS+=("$dir")
+            echo "  Discovered: $dir"
+            echo "Discovered distro: $dir" >> "$LOG_FILE"
+        fi
+    done < <(echo "$RAW_LISTING" | grep -oP 'href="/?(\K[^"/]+)(?=/")' | grep -iE "^($LINUX_KEYWORDS)" | sort -u)
+
+    if [ ${#SUBFOLDERS[@]} -eq 0 ]; then
+        echo "  $(tput bold)Error: No Linux distributions found on server!$(tput sgr0)"
+        echo "  This may indicate a server issue or network problem."
+        exit 1
+    fi
+
+    echo "Found ${#SUBFOLDERS[@]} distribution(s)."
+    echo ""
 fi
-
-echo "Found ${#SUBFOLDERS[@]} distribution(s)."
-echo ""
 
 # Function to generate friendly display name from folder name
 get_distro_display_name() {
@@ -131,60 +227,95 @@ OPTIONS=()
 INDEX=1
 MAX_RETRIES=3
 
-for SUBFOLDER in "${SUBFOLDERS[@]}"; do
-    SUBFOLDER_LOWER=$(echo "$SUBFOLDER" | tr '[:upper:]' '[:lower:]')
-    echo "Fetching $SUBFOLDER_LOWER..." >> "$LOG_FILE"
-    RETRY_COUNT=0
-    LISTING=""
-    while [ -z "$LISTING" ] && [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; do
-        RAW_LISTING=$(curl -s "$BASE_URL/$SUBFOLDER_LOWER/")
-        HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/$SUBFOLDER_LOWER/")
-        echo "HTTP status for $BASE_URL/$SUBFOLDER_LOWER/: $HTTP_STATUS" >> "$LOG_FILE"
-        if [ "$HTTP_STATUS" != "200" ]; then
-            echo "Failed to access $BASE_URL/$SUBFOLDER_LOWER/ (HTTP $HTTP_STATUS)" >> "$LOG_FILE"
-            break
-        fi
-        LISTING=$(echo "$RAW_LISTING" | grep -oP '(?<=href=")[^"]*\.7z(?=")')
-        if [ -z "$LISTING" ]; then
-            echo "Retry $((RETRY_COUNT + 1)) for $SUBFOLDER_LOWER: No .7z files found" >> "$LOG_FILE"
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            sleep 1
-        fi
-    done
-    if [ -n "$LISTING" ]; then
-        while IFS= read -r ZIP_FILE; do
-            if [ -n "$ZIP_FILE" ]; then
-                echo "Found: $ZIP_FILE in $SUBFOLDER_LOWER" >> "$LOG_FILE"
-                VARIANT=""
-                if [ "$SUBFOLDER_LOWER" = "ubuntu-noble" ]; then
-                    if [[ "$ZIP_FILE" =~ "kUbuntu" ]]; then
-                        VARIANT="KUbuntu"
-                    elif [[ "$ZIP_FILE" =~ "unity" ]]; then
-                        VARIANT="Ubuntu Unity"
-                    fi
-                fi
-                if [ -n "$VARIANT" ]; then
-                    OPTION_NAME="${DISTRO_MAP[$SUBFOLDER_LOWER]} - $VARIANT"
-                else
-                    OPTION_NAME="${DISTRO_MAP[$SUBFOLDER_LOWER]}"
-                fi
-                OPTIONS+=("$INDEX) $OPTION_NAME - $ZIP_FILE")
-                eval "ZIP_URL_$INDEX=$BASE_URL$ZIP_FILE"
-                eval "DISTRO_$INDEX=$SUBFOLDER"
-                eval "ID_$INDEX=SWR-${SUBFOLDER%%-*}"
-                eval "PREFIX_$INDEX=/switchroot/$SUBFOLDER_LOWER/"
-                eval "INI_$INDEX=L4T_${SUBFOLDER%%-*}.ini"
-                INDEX=$((INDEX + 1))
-            fi
-        done <<< "$LISTING"
-    else
-        echo "Failed to fetch .7z files from $SUBFOLDER_LOWER after $MAX_RETRIES retries" >> "$LOG_FILE"
-    fi
-    echo -n "."
-done
+# If we're using cached distro, skip file listing and use cached file directly
+if [ "$SKIP_FILE_LISTING" = true ] && [ -n "$CACHED_7Z_FILE" ]; then
+    echo "Using cached file: $(basename "$CACHED_7Z_FILE")"
+    echo "Using cached file: $CACHED_7Z_FILE" >> "$LOG_FILE"
 
-echo # Newline after dots
-echo ""
+    # Set up variables directly from cached file
+    CACHED_7Z_NAME=$(basename "$CACHED_7Z_FILE")
+    CACHED_DISTRO_LOWER=$(echo "$CACHED_DISTRO" | tr '[:upper:]' '[:lower:]')
+
+    # Determine variant if applicable
+    VARIANT=""
+    if [ "$CACHED_DISTRO_LOWER" = "ubuntu-noble" ]; then
+        if [[ "$CACHED_7Z_NAME" =~ "kUbuntu" ]]; then
+            VARIANT="KUbuntu"
+        elif [[ "$CACHED_7Z_NAME" =~ "unity" ]]; then
+            VARIANT="Ubuntu Unity"
+        fi
+    fi
+
+    if [ -n "$VARIANT" ]; then
+        OPTION_NAME="${DISTRO_MAP[$CACHED_DISTRO]} - $VARIANT"
+    else
+        OPTION_NAME="${DISTRO_MAP[$CACHED_DISTRO]}"
+    fi
+
+    OPTIONS+=("$INDEX) $OPTION_NAME - $CACHED_7Z_NAME")
+    eval "ZIP_URL_$INDEX=$CACHED_7Z_FILE"  # Use local cached file path
+    eval "DISTRO_$INDEX=$CACHED_DISTRO"
+    eval "ID_$INDEX=SWR-${CACHED_DISTRO%%-*}"
+    eval "PREFIX_$INDEX=/switchroot/$CACHED_DISTRO_LOWER/"
+    eval "INI_$INDEX=L4T_${CACHED_DISTRO%%-*}.ini"
+    INDEX=$((INDEX + 1))
+else
+    # Normal flow: fetch file listings from server
+    for SUBFOLDER in "${SUBFOLDERS[@]}"; do
+        SUBFOLDER_LOWER=$(echo "$SUBFOLDER" | tr '[:upper:]' '[:lower:]')
+        echo "Fetching $SUBFOLDER_LOWER..." >> "$LOG_FILE"
+        RETRY_COUNT=0
+        LISTING=""
+        while [ -z "$LISTING" ] && [ "$RETRY_COUNT" -lt "$MAX_RETRIES" ]; do
+            RAW_LISTING=$(curl -s "$BASE_URL/$SUBFOLDER_LOWER/")
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/$SUBFOLDER_LOWER/")
+            echo "HTTP status for $BASE_URL/$SUBFOLDER_LOWER/: $HTTP_STATUS" >> "$LOG_FILE"
+            if [ "$HTTP_STATUS" != "200" ]; then
+                echo "Failed to access $BASE_URL/$SUBFOLDER_LOWER/ (HTTP $HTTP_STATUS)" >> "$LOG_FILE"
+                break
+            fi
+            LISTING=$(echo "$RAW_LISTING" | grep -oP '(?<=href=")[^"]*\.7z(?=")')
+            if [ -z "$LISTING" ]; then
+                echo "Retry $((RETRY_COUNT + 1)) for $SUBFOLDER_LOWER: No .7z files found" >> "$LOG_FILE"
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                sleep 1
+            fi
+        done
+        if [ -n "$LISTING" ]; then
+            while IFS= read -r ZIP_FILE; do
+                if [ -n "$ZIP_FILE" ]; then
+                    echo "Found: $ZIP_FILE in $SUBFOLDER_LOWER" >> "$LOG_FILE"
+                    VARIANT=""
+                    if [ "$SUBFOLDER_LOWER" = "ubuntu-noble" ]; then
+                        if [[ "$ZIP_FILE" =~ "kUbuntu" ]]; then
+                            VARIANT="KUbuntu"
+                        elif [[ "$ZIP_FILE" =~ "unity" ]]; then
+                            VARIANT="Ubuntu Unity"
+                        fi
+                    fi
+                    if [ -n "$VARIANT" ]; then
+                        OPTION_NAME="${DISTRO_MAP[$SUBFOLDER_LOWER]} - $VARIANT"
+                    else
+                        OPTION_NAME="${DISTRO_MAP[$SUBFOLDER_LOWER]}"
+                    fi
+                    OPTIONS+=("$INDEX) $OPTION_NAME - $ZIP_FILE")
+                    eval "ZIP_URL_$INDEX=$BASE_URL$ZIP_FILE"
+                    eval "DISTRO_$INDEX=$SUBFOLDER"
+                    eval "ID_$INDEX=SWR-${SUBFOLDER%%-*}"
+                    eval "PREFIX_$INDEX=/switchroot/$SUBFOLDER_LOWER/"
+                    eval "INI_$INDEX=L4T_${SUBFOLDER%%-*}.ini"
+                    INDEX=$((INDEX + 1))
+                fi
+            done <<< "$LISTING"
+        else
+            echo "Failed to fetch .7z files from $SUBFOLDER_LOWER after $MAX_RETRIES retries" >> "$LOG_FILE"
+        fi
+        echo -n "."
+    done
+
+    echo # Newline after dots
+    echo ""
+fi
 
 if [ ${#OPTIONS[@]} -eq 0 ]; then
     echo "$(tput bold)Error: No Linux variants found!$(tput sgr0)"
@@ -209,13 +340,51 @@ spinner() {
 
 # Step 1: Select Distro
 echo "$(tput bold)========== Step 1: Select Linux Distribution ==========$(tput sgr0)"
-echo "Available distributions for eMMC installation:"
-OPTIONS=("0) Use local OS image file (.7z)" "${OPTIONS[@]}")
-for OPT in "${OPTIONS[@]}"; do
-    echo "  $OPT"
-done
-echo "----------"
-while true; do
+
+# Check if we have a cached distro and can auto-select it
+AUTO_SELECT_INDEX=""
+if [ -n "$CACHED_DISTRO" ] && [ "$PRESERVE_DOWNLOADS" = true ]; then
+    # Find the index for the cached distro
+    for i in $(seq 1 $((INDEX - 1))); do
+        DISTRO_VAR="DISTRO_$i"
+        DISTRO_VAL=$(eval echo \$$DISTRO_VAR)
+        DISTRO_VAL_LOWER=$(echo "$DISTRO_VAL" | tr '[:upper:]' '[:lower:]')
+        if [ "$DISTRO_VAL_LOWER" = "$CACHED_DISTRO" ]; then
+            AUTO_SELECT_INDEX=$i
+            break
+        fi
+    done
+
+    if [ -n "$AUTO_SELECT_INDEX" ]; then
+        echo "  Auto-selecting cached distro: $(eval echo \$DISTRO_$AUTO_SELECT_INDEX)"
+        DISTRO_CHOICE=$AUTO_SELECT_INDEX
+
+        # Extract variables immediately for auto-selected distro
+        DISTRO=$(eval echo \$DISTRO_$AUTO_SELECT_INDEX)
+        ZIP_URL=$(eval echo \$ZIP_URL_$AUTO_SELECT_INDEX)
+        ID=$(eval echo \$ID_$AUTO_SELECT_INDEX)
+        PREFIX=$(eval echo \$PREFIX_$AUTO_SELECT_INDEX)
+        INI=$(eval echo \$INI_$AUTO_SELECT_INDEX)
+        # Check if ZIP_URL is a local file path (cached file) or remote URL
+        if [[ "$ZIP_URL" =~ ^https?:// ]]; then
+            IS_LOCAL="false"
+        else
+            IS_LOCAL="true"
+        fi
+    fi
+fi
+
+# Only show selection menu if not auto-selected
+if [ -z "$AUTO_SELECT_INDEX" ]; then
+    echo "Available distributions for eMMC installation:"
+    OPTIONS=("0) Use local OS image file (.7z)" "${OPTIONS[@]}")
+    for OPT in "${OPTIONS[@]}"; do
+        echo "  $OPT"
+    done
+    echo "----------"
+fi
+
+while [ -z "$DISTRO_CHOICE" ]; do
     read -p "$(tput bold)Enter number (0-$(( ${#OPTIONS[@]} - 1 ))) or 'retry': $(tput sgr0)" DISTRO_CHOICE
     if [ "$DISTRO_CHOICE" = "retry" ]; then
         echo "Refreshing selection..."
@@ -267,7 +436,12 @@ while true; do
             ID=$(eval echo \$ID_$DISTRO_CHOICE)
             PREFIX=$(eval echo \$PREFIX_$DISTRO_CHOICE)
             INI=$(eval echo \$INI_$DISTRO_CHOICE)
-            IS_LOCAL="false"
+            # Check if ZIP_URL is a local file path (cached file) or remote URL
+            if [[ "$ZIP_URL" =~ ^https?:// ]]; then
+                IS_LOCAL="false"
+            else
+                IS_LOCAL="true"
+            fi
         fi
         break
     else
@@ -276,7 +450,11 @@ while true; do
 done
 
 echo ""
-if [ "$DISTRO_CHOICE" -eq 0 ]; then
+if [ -n "$AUTO_SELECT_INDEX" ]; then
+    # For auto-selected cached distro, show simpler message
+    ZIP_FILE_DISPLAY=$(basename "$ZIP_URL")
+    echo "Selected: $DISTRO - $ZIP_FILE_DISPLAY (cached)"
+elif [ "$DISTRO_CHOICE" -eq 0 ]; then
     echo "Selected: $DISTRO (0) Use local OS image file (.7z))"
 else
     echo "Selected: $DISTRO (${OPTIONS[$DISTRO_CHOICE]})"
@@ -298,11 +476,16 @@ if [ "$IS_LOCAL" = "true" ]; then
     if [ -f "$ZIP_URL" ]; then
         FILE_SIZE=$(stat -c%s "$ZIP_URL")
         if [ "$FILE_SIZE" -ge "$MIN_SIZE" ]; then
-            cp "$ZIP_URL" "$TEMP_DIR/$ZIP_FILE" || {
-                echo "  $(tput bold)Error: Failed to copy $ZIP_URL to $TEMP_DIR!$(tput sgr0)"
-                exit 1
-            }
-            echo "  Copied $ZIP_FILE to $TEMP_DIR ($((FILE_SIZE / 1024 / 1024)) MB)"
+            # Check if the file is already in TEMP_DIR (cached file)
+            if [ "$(dirname "$ZIP_URL")" = "$TEMP_DIR" ]; then
+                echo "  $ZIP_FILE already in temp directory ($((FILE_SIZE / 1024 / 1024)) MB), skipping copy..."
+            else
+                cp "$ZIP_URL" "$TEMP_DIR/$ZIP_FILE" || {
+                    echo "  $(tput bold)Error: Failed to copy $ZIP_URL to $TEMP_DIR!$(tput sgr0)"
+                    exit 1
+                }
+                echo "  Copied $ZIP_FILE to $TEMP_DIR ($((FILE_SIZE / 1024 / 1024)) MB)"
+            fi
         else
             echo "  $(tput bold)Error: Local file too small ($((FILE_SIZE / 1024 / 1024)) MB), expected at least $((MIN_SIZE / 1024 / 1024)) MB.$(tput sgr0)"
             exit 1
@@ -322,17 +505,37 @@ else
         fi
     fi
 
+    # Check if aria2c is available for faster multi-connection download
+    USE_ARIA2=false
+    if command -v aria2c &> /dev/null; then
+        USE_ARIA2=true
+        echo "  Using aria2c for faster multi-connection download..."
+    fi
+
     while [ ! -f "$TEMP_DIR/$ZIP_FILE" ] || [ "$(stat -c%s "$TEMP_DIR/$ZIP_FILE")" -lt "$MIN_SIZE" ]; do
         if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
             echo "  $(tput bold)Error: Download failed after $MAX_RETRIES attempts!$(tput sgr0)"
             echo "  Download manually from $ZIP_URL and place in $TEMP_DIR."
             exit 1
         fi
+
         echo "  Downloading $ZIP_FILE (Attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)..."
-        curl -L --progress-bar -o "$TEMP_DIR/$ZIP_FILE" "$ZIP_URL" || {
-            echo "  Warning: Download failed, retrying..."
-            rm -f "$TEMP_DIR/$ZIP_FILE"
-        }
+
+        if [ "$USE_ARIA2" = true ]; then
+            # Use aria2c with 8 connections for faster download (like IDM)
+            aria2c -x 8 -s 8 -k 1M --allow-overwrite=true --auto-file-renaming=false \
+                   -d "$TEMP_DIR" -o "$ZIP_FILE" "$ZIP_URL" || {
+                echo "  Warning: Download failed, retrying..."
+                rm -f "$TEMP_DIR/$ZIP_FILE"
+            }
+        else
+            # Fallback to curl with progress bar
+            curl -L --progress-bar -o "$TEMP_DIR/$ZIP_FILE" "$ZIP_URL" || {
+                echo "  Warning: Download failed, retrying..."
+                rm -f "$TEMP_DIR/$ZIP_FILE"
+            }
+        fi
+
         FILE_SIZE=$(stat -c%s "$TEMP_DIR/$ZIP_FILE" 2>/dev/null || echo 0)
         if [ "$FILE_SIZE" -lt "$MIN_SIZE" ]; then
             echo "  Error: File too small ($((FILE_SIZE / 1024 / 1024)) MB), expected $((MIN_SIZE / 1024 / 1024)) MB."
@@ -347,7 +550,17 @@ fi
 
 echo "  Extracting $DISTRO files..."
 7z x "$TEMP_DIR/$ZIP_FILE" -o"$TEMP_DIR" >> "$LOG_FILE" 2>&1 || {
-    echo "  $(tput bold)Error: Extraction failed! File may be corrupted.$(tput sgr0)"
+    echo "  $(tput bold)Error: Extraction failed!$(tput sgr0)"
+    echo ""
+    echo "  Last 20 lines of 7z output:"
+    tail -20 "$LOG_FILE" | sed 's/^/    /'
+    echo ""
+    echo "  Possible causes:"
+    echo "    - Corrupted download (try deleting and re-downloading)"
+    echo "    - Incompatible 7z version (try: apt install p7zip-full)"
+    echo "    - Archive requires password (not supported)"
+    echo ""
+    echo "  Full log saved at: $LOG_FILE"
     exit 1
 }
 echo "  Extraction complete."
@@ -474,10 +687,15 @@ if [ -n "$SWITCHROOT_SUBDIR" ]; then
         SWITCHROOT_SUBDIR="$TEMP_DIR/switchroot/$SUBDIR_NAME"
     fi
 
-    # Update boot_prefixes in INI file
+    # Update boot_prefixes in INI file only if needed
+    # Match original behavior: only update if boot_prefixes exists AND doesn't match expected path
     if grep -q "boot_prefixes=" "$INI_FILE"; then
-        sed -i "s|boot_prefixes=.*|boot_prefixes=$SWITCHROOT_PATH|" "$INI_FILE"
-        echo "Updated boot_prefixes to $SWITCHROOT_PATH in $INI_FILE." >> "$LOG_FILE"
+        if ! grep -q "boot_prefixes=$SWITCHROOT_PATH" "$INI_FILE"; then
+            sed -i "s|boot_prefixes=.*|boot_prefixes=$SWITCHROOT_PATH|" "$INI_FILE"
+            echo "Updated boot_prefixes to $SWITCHROOT_PATH in $INI_FILE." >> "$LOG_FILE"
+        else
+            echo "boot_prefixes already set to $SWITCHROOT_PATH, no change needed." >> "$LOG_FILE"
+        fi
     else
         echo "boot_prefixes=$SWITCHROOT_PATH" >> "$INI_FILE"
         echo "Added boot_prefixes=$SWITCHROOT_PATH to $INI_FILE." >> "$LOG_FILE"
@@ -626,10 +844,21 @@ echo -n "  Copying boot files and .ini to SD card"
         echo "Error: Failed to copy $INI_FILE to SD card!" >> "$LOG_FILE"
         exit 1
     }
-    mkdir -p "$SD_MOUNT/switchroot/$DISTRO_LOWER"
-    cp -r "$TEMP_DIR/switchroot/$DISTRO_LOWER"/* "$SD_MOUNT/switchroot/$DISTRO_LOWER/" || {
-        echo "Warning: Failed to copy some boot files to $SD_MOUNT/switchroot/$DISTRO_LOWER." >> "$LOG_FILE"
-    }
+
+    # Use the actual subdirectory name that was found, not the expected one
+    ACTUAL_SUBDIR_NAME=$(basename "$SWITCHROOT_SUBDIR")
+    mkdir -p "$SD_MOUNT/switchroot/$ACTUAL_SUBDIR_NAME"
+
+    if [ -d "$SWITCHROOT_SUBDIR" ]; then
+        cp -r "$SWITCHROOT_SUBDIR"/* "$SD_MOUNT/switchroot/$ACTUAL_SUBDIR_NAME/" || {
+            echo "Warning: Failed to copy some boot files to $SD_MOUNT/switchroot/$ACTUAL_SUBDIR_NAME." >> "$LOG_FILE"
+        }
+        echo "Copied boot files from $SWITCHROOT_SUBDIR to SD card" >> "$LOG_FILE"
+    else
+        echo "Error: SWITCHROOT_SUBDIR ($SWITCHROOT_SUBDIR) does not exist!" >> "$LOG_FILE"
+        exit 1
+    fi
+
     sync
 ) &
 spinner $!

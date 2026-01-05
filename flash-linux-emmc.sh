@@ -14,7 +14,7 @@ fi
 clear
 echo "$(tput bold)================ Switchroot Linux eMMC Flash Script ================$(tput sgr0)"
 echo "Requirements: Linux environment, Hekate, SD card (FAT32), internet."
-echo "Fetches Linux variants from download.switchroot.org - Version 1.1.0"
+echo "Fetches Linux variants from download.switchroot.org - Version 1.2.0"
 echo "Setting up, please wait..."
 
 # Dependency check
